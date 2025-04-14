@@ -1,0 +1,41 @@
+/* Filename: Lab 5.cpp
+Author: Brandon Mills Jacinto
+Date: 20/02/2025
+*/
+
+
+#include "mbed.h" // I used the Mbed Library for Hardware control.
+
+AnalogIn Potentiomer(A0); // Analog input pin for Potentiomer
+
+AnalogIn TempSensor(A1); // Analog input pin for Temp sensor
+
+AnalogIn GasSensor(A2); // Analog input pin for Gas sensor
+
+UnbufferedSerial uartUsb(USBTX, USBRX, 115200); // Serial communication for USB at 115200 baud rate
+
+float PotentiometerReading; // Declare a float variable to store the Potentiomer reading.
+float TemperatureReading; // Declare a float variable to store the Temp sensor reading.
+float GasSensorReading; // Declare a float variable to store the gas sensor reading.
+
+int main() {
+    while( true ) { // Infinite loop to continuously read and send gas sensor and temp sensor values
+        uartUsb.write( "---------------------------------\r\n", 35); // Prints a separator line
+        char str[10] = "";  // Character array to store formatted strings
+
+PotentiometerReading = Potentiomer.read()*3.3; // Reads the Potentiomer readings
+str[0] = '\0'; // Clear the string by setting the first character to null.
+sprintf ( str, "Potentiometer reading: %.2f\r\n", PotentiometerReading); // Formats Potentiomer reading into a string
+uartUsb.write( str, strlen(str) ); // Sends Potentiomer reading to the serial terminal
+
+TemperatureReading = TempSensor.read()*330; // Reads the temperature sensor readings
+sprintf ( str, "Temperature reading: %.2f\r\n", TemperatureReading); // Formats temperature reading into a string
+uartUsb.write( str, strlen(str) ); // Sends temperature reading to the serial terminal
+
+GasSensorReading = GasSensor.read()*3.3; // Reads the Gas sensor readings
+sprintf ( str, "Gas reading: %.2f\r\n", GasSensorReading); // Formats the gas reading into a string
+uartUsb.write( str, strlen(str) ); // Sends gas reading to the serial terminal
+
+ThisThread::sleep_for(200); // Wait for 200ms
+}
+}
