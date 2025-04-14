@@ -3,39 +3,608 @@ Author: Brandon Mills Jacinto
 Date: 20/02/2025
 */
 
-
 #include "mbed.h" // I used the Mbed Library for Hardware control.
+#include "arm_book_lib.h" // arm_book_lib used as a custom library
+#include "string.h" // String library used as I will be working with strings
+#include "ctime" // CTime Library used for time functions
 
-AnalogIn Potentiomer(A0); // Analog input pin for Potentiomer
+#define THE_NUMBER_OF_KEYS 4 // Number of keys in the code sequence
+#define THE_BLINKING_TIME_GAS_ALARM 1000 // Blinking time for gas alarm (ms)
+#define THE_BLINKING_TIME_OVER_TEMPERATURE_ALARM 500 // Blinking time for over temp alarm (ms)
+#define THE_BLINKING_TIME_GAS_AND_OVER_TEMPERATURE_ALARM 100 // Blinking time for both alarms (ms)
+#define THE_NUMBER_OF_AVGERAGE_SAMPLES 100 // Number of samples for averaging temperature
+#define OVER_TEMPERATURE_LEVELS 50 // Temperature threshold for alarm (Celsius)
+#define TIME_INCREMENT_MS 10 // Time increment for loop (ms)
+#define DEBOUNCE_KEY_TIME_MS 40 // Debounce time for keypad (ms)
+#define THE_KEYPAD_NUMBER_OF_ROWS 4 // Number of rows in keypad
+#define THE_KEYPAD_NUMBER_OF_COLUMNS 4 // Number of columns in keypad
+#define EVENT_MAXIMUM_STORAGE 100 // Maximum number of stored events
+#define EVENT_NAME_MAXIMUM_LENGTH 14 // Maximum length of event name
+#define GAS_LEVEL_DANGEROUS 1000 // Gas level threshold for alarm
 
-AnalogIn TempSensor(A1); // Analog input pin for Temp sensor
+// Lines 26-29 states definitions for matrix keypad
+typedef enum {
+MATRIX_KEYPAD_SCANNING,
+MATRIX_KEYPAD_DEBOUNCE,
+MATRIX_KEYPAD_KEY_HOLD_PRESSED
+} TheMatrixKeypadState_t;
 
-AnalogIn GasSensor(A2); // Analog input pin for Gas sensor
+// Lines 33-36 is used for storing system events
+typedef struct systemEvent {
+time_t seconds;
+char typeOfEvent[EVENT_NAME_MAXIMUM_LENGTH];
+} systemEvent_t;
 
+
+DigitalIn AlarmTestButton(BUTTON1); // Button to trigger alarm test
+DigitalOut AlarmLed(LED1); // LED1 for alarm indication
+DigitalOut IncorrectCodeLed(LED3); // LED3 for incorrect code
+DigitalOut SystemBlockedLed(LED2); // LED2 for system blocked
+DigitalInOut SirenPin(PE_10); // Pin for siren control
 UnbufferedSerial uartUsb(USBTX, USBRX, 115200); // Serial communication for USB at 115200 baud rate
+AnalogIn lm35(A1); // Analog input for LM35 temperature sensor
+AnalogIn GasSen0127(A2); // Analog input for gas sensor
+DigitalOut KeypadRowPins[THE_KEYPAD_NUMBER_OF_ROWS] = {PB_3, PB_5, PC_7, PA_15}; // Row pins for keypad
+DigitalIn KeypadColPins[THE_KEYPAD_NUMBER_OF_COLUMNS] = {PB_12, PB_13, PB_15, PC_6}; // Column pins for keypad
 
-float PotentiometerReading; // Declare a float variable to store the Potentiomer reading.
-float TemperatureReading; // Declare a float variable to store the Temp sensor reading.
-float GasSensorReading; // Declare a float variable to store the gas sensor reading.
+bool AlarmState = OFF; // Alarm state (ON/OFF)
+bool IncorrectCode = false; // Flag for incorrect code entry
+bool OverTemperatureDetector = OFF; // Flag for over temperature detection
+int NumberOfIncorrectCodes = 0; // Count of incorrect code entries
+int NumberHashtagKeyReleasedEvents = 0; // Count of hashtag key release events
+int KeyBeingCompared = 0; // Index for comparing entered code
+char CodeSequence[THE_NUMBER_OF_KEYS] = {'2', '2', '0', '4'}; // Correct code sequence
+char KeyPressed[THE_NUMBER_OF_KEYS] = {'0', '0', '0', '0'}; // Entered code sequence
+int AccumulatedTimeAlarmOfAlarm = 0; // Timer for alarm blinking
+bool AlarmLastState = OFF; // Previous alarm state
+bool GasLastState = OFF; // Previous gas detection state
+bool TempemperatureStateLast = OFF; // Previous over temp state
+bool IncorrectCodeStateLast = OFF; // Previous incorrect code led state
+bool SystemBlockedStateLast = OFF; // Previous system blocked led state
+bool GasDetectorState = OFF; // Gas detection state
+bool OverTemperatureStateDetected = OFF; // Over temperature detected state
+bool AlarmDisplayMessage = false; // Flag to display alarm message once
+float PotentiometerReading = 0.0; // Potentiometer reading (unused)
+float lm35ReadingsAverage = 0.0; // Average temperature reading
+float lm35ReadingsSum = 0.0; // Sum of temperature readings
+float lm35ReadingsArray[THE_NUMBER_OF_AVGERAGE_SAMPLES]; // Array to store temperature readings
+float lm35TempC = 0.0; // Temperature in Celsius
+float GasLevels = 0.0; // Gas level reading
+float GasSenorReads = 0.0; // Raw gas sensor reading
+int TheAccDebouncefMatrixKeypadTime = 0; // Debounce timer for keypad
+int TheMatrixKeypadCodeOfIndex = 0; // Index for entered code in keypad
+char TheMatrixKeypadTheLastKeyPressed = '\0'; // Last key pressed on keypad
+char TheMatrixOfKeypadIndexIntoTheCharArray[] = { // Keypad layout
+    '1', '2', '3', 'A',
+    '4', '5', '6', 'B',
+    '7', '8', '9', 'C',
+    '*', '0', '#', 'D',
+};
 
-int main() {
-    while( true ) { // Infinite loop to continuously read and send gas sensor and temp sensor values
-        uartUsb.write( "---------------------------------\r\n", 35); // Prints a separator line
-        char str[10] = "";  // Character array to store formatted strings
+TheMatrixKeypadState_t MatrixKeypadState; // Current state of keypad
+int EventsIndex = 0; // Index for storing events
+systemEvent_t ArrayOfTheStoredEvents[EVENT_MAXIMUM_STORAGE]; // Array to store events
 
-PotentiometerReading = Potentiomer.read()*3.3; // Reads the Potentiomer readings
-str[0] = '\0'; // Clear the string by setting the first character to null.
-sprintf ( str, "Potentiometer reading: %.2f\r\n", PotentiometerReading); // Formats Potentiomer reading into a string
-uartUsb.write( str, strlen(str) ); // Sends Potentiomer reading to the serial terminal
+// Lines 89-107 are for decalring functions
+void InputsInit();
+void OutputsInit();
+void AlarmActivationUpdate();
+void AlarmDeactivationUpdate();
+void uartTask();
+void AvailableCommands();
+bool AreEqual();
+void EventLogToUpdate();
+void SystemElementStateUpdate( bool LastState,
+                               bool CurrentState,
+                               const char* ElementName);
+void DisplayStartupMessage();
+float CelsiusToFahrenheit(float TempInCelsiusDegrees);
+float AnalogReadingScaledWithTheLM35Formula(float TheAnalogReading);
+void lm35ReadingsArrayInit();
+float GasSen0127V(float AnalogRead);
+void MatrixKeypadInit();
+char MatrixKeypadScan();
+char MatrixKeypadUpdate();
 
-TemperatureReading = TempSensor.read()*330; // Reads the temperature sensor readings
-sprintf ( str, "Temperature reading: %.2f\r\n", TemperatureReading); // Formats temperature reading into a string
-uartUsb.write( str, strlen(str) ); // Sends temperature reading to the serial terminal
-
-GasSensorReading = GasSensor.read()*3.3; // Reads the Gas sensor readings
-sprintf ( str, "Gas reading: %.2f\r\n", GasSensorReading); // Formats the gas reading into a string
-uartUsb.write( str, strlen(str) ); // Sends gas reading to the serial terminal
-
-ThisThread::sleep_for(200); // Wait for 200ms
+// Main Function
+int main()
+{
+    inputsInit(); // Initialises input pins
+    outputsInit(); // Initialises output pins
+    DisplayStartupMessage(); // Displays the start up message+
+    while (true) { // Infinite Loop
+       alarmActivationUpdate(); // Updates alarm activation
+        alarmDeactivationUpdate(); // Updates alarm deactivation
+        uartTask(); // Handles UART communication
+    EventLogToUpdate(); // Updates event log
+    delay(TIME_INCREMENT_MS); // delay for the defined time increment in ms
+    }
 }
+
+// Initialises input pins
+void InputsInit() {
+    lm35ReadingsArrayInit(); // Initialises temperature readings array
+    AlarmTestButton.mode(PullDown); // Configures alarm test button with pull-down resistor
+    SirenPin.mode(OpenDrain); // Configures siren pin as open-drain
+    SirenPin.input(); // Sets siren pin as the input initially
+    MatrixKeypadInit(); // Initialise the keypad
+}
+// Initialises the output pins
+void OutputsInit() {
+    AlarmLed = OFF; // Turns off the alarm LED
+    IncorrectCodeLed = OFF; // Turns off incorrect code LED
+    SystemBlockedLed = OFF; // Turns off system blocked LED
+}
+// Updates alarm activation logic
+void AlarmActivationUpdate() {
+    static int lm35SampleIndex = 0; // Index for temperature samples
+    int i = 0;
+
+ // Lines 144-147 reads the temperature and stores it into an array
+    lm35ReadingsArray[lm35SampleIndex] = lm35.read();
+    lm35SampleIndex++;
+    if (lm35SampleIndex >= THE_NUMBER_OF_AVGERAGE_SAMPLES) {
+        lm35SampleIndex = 0;
+    }
+ // Lines 150-155 calculates the average temperature
+lm35ReadingsSum = 0.0;
+for (i = 0; i < THE_NUMBER_OF_AVGERAGE_SAMPLES; i++) {
+lm35ReadingsSum = lm35ReadingsSum + lm35ReadingsArray[i];
+}
+lm35ReadingsAverage = lm35ReadingsSum / THE_NUMBER_OF_AVGERAGE_SAMPLES;
+lm35TempC = AnalogReadingScaledWithTheLM35Formula (lm35ReadingsAverage);
+
+// Lines 158-161 checks if the temp sensor is above temperature
+if (lm35TempC > OVER_TEMPERATURE_LEVELS) {
+OverTemperatureDetector = ON;
+} else {
+OverTemperatureDetector = OFF;
+}
+
+GasLevels = GasSen0127V(GasSen0127);  // Reads the gas sensor
+// Lines 166-168 checks for dangerous gas level
+if(GasLevels > GAS_LEVEL_DANGEROUS) {
+GasDetectorState = ON;
+AlarmState = ON;
+}
+// Lines 171-173 activates the alarm if over temperature or gas detected
+if(OverTemperatureDetector) {
+OverTemperatureStateDetected = ON;
+AlarmState = ON;
+}
+// Lines 176-179 activates the alarm if test button is pressed
+if(AlarmTestButton) {
+OverTemperatureStateDetected = ON;
+GasDetectorState = ON;
+AlarmState = ON;
+}
+
+// Lines 183-199 is code for the alarms behaviour
+if(AlarmState) {
+if (!AlarmDisplayMessage) {
+uartUsb.write("Please enter the deactivation code to reset alarm!\r\n\r\n", 58);
+AlarmDisplayMessage = true;
+if (EventsIndex < EVENT_MAXIMUM_STORAGE) {
+time_t CurrentTime = time(NULL);
+ArrayOfTheStoredEvents[EventsIndex].seconds = CurrentTime;
+strcpy(ArrayOfTheStoredEvents[EventsIndex].typeOfEvent, "ALARM TRIGGERED");
+EventsIndex++;
+char timeStr[50];
+sprintf(timeStr, "Date and Time = %s\r\n", ctime(&CurrentTime));
+uartUsb.write(timeStr, strlen(timeStr));
+}
+}
+AccumulatedTimeAlarmOfAlarm = AccumulatedTimeAlarmOfAlarm + TIME_INCREMENT_MS;
+SirenPin.output();
+SirenPin = LOW;
+
+// Lines 202-222 is the blinking behaviour dependant on the which alarm is activated
+if(GasDetectorState && OverTemperatureStateDetected) {
+if(AccumulatedTimeAlarmOfAlarm >= THE_BLINKING_TIME_GAS_AND_OVER_TEMPERATURE_ALARM) {
+AccumulatedTimeAlarmOfAlarm = 0;
+AlarmLed = !AlarmLed;
+}
+} else if(GasDetectorState) {
+if(AccumulatedTimeAlarmOfAlarm >= THE_BLINKING_TIME_GAS_ALARM) {
+AccumulatedTimeAlarmOfAlarm = 0;
+AlarmLed = !AlarmLed;
+}
+} else if (OverTemperatureStateDetected) {
+if(AccumulatedTimeAlarmOfAlarm >= THE_BLINKING_TIME_OVER_TEMPERATURE_ALARM) {
+AccumulatedTimeAlarmOfAlarm = 0;
+AlarmLed = !AlarmLed;
+}
+}
+} else {
+AlarmLed = OFF;
+GasDetectorState = OFF;
+OverTemperatureStateDetected = OFF;
+SirenPin.input();
+}
+}
+
+// Lines 227-264 updates the alarm deactivation behaviour
+void AlarmDeactivationUpdate(){
+if(NumberOfIncorrectCodes < 5) {
+char KeyReleased = MatrixKeypadUpdate();
+if(KeyReleased != '\0' && KeyReleased != '#') {
+KeyPressed[TheMatrixKeypadCodeOfIndex] = KeyReleased;
+if(TheMatrixKeypadCodeOfIndex >= THE_NUMBER_OF_KEYS) {
+TheMatrixKeypadCodeOfIndex = 0;
+} else {
+TheMatrixKeypadCodeOfIndex++;
+}
+}
+if(KeyReleased == '#') {
+if(IncorrectCodeLed) {
+NumberHashtagKeyReleasedEvents++;
+if(NumberHashtagKeyReleasedEvents >= 2) {
+IncorrectCodeLed = OFF;
+NumberHashtagKeyReleasedEvents = 0;
+TheMatrixKeypadCodeOfIndex = 0;
+}
+} else {
+if (AlarmState) {
+if (AreEqual() ) {
+AlarmState = OFF;
+NumberOfIncorrectCodes = 0;
+TheMatrixKeypadCodeOfIndex = 0;
+AlarmDisplayMessage = false;
+SirenPin.input();
+SirenPin = HIGH;
+AlarmLed = 0;
+} else {
+IncorrectCodeLed = ON;
+NumberOfIncorrectCodes++;
+}
+}
+}
+}
+} else {
+SystemBlockedLed = ON;
+}
+}
+
+// Lines 269-435 handles the UART communication to the serial terminal
+void uartTask()
+{
+    char receivedChar = '\0';
+    char str[100];
+    int stringLength;
+    if(uartUsb.readable()) {
+    uartUsb.read(&receivedChar, 1);
+    switch (receivedChar) {
+        case '1':
+        if (AlarmState) {
+            uartUsb.write("The alarm is activated\r\n", 27);
+            } else {
+                uartUsb.write("The alarm is not activated\r\n", 31);
+                }
+                break;
+                case '2':
+                if (GasDetectorState) {
+                    uartUsb.write("Gas has been detected\r\n", 26);
+                    } else {
+                        uartUsb.write("Gas has not been detected\r\n", 30);
+                        }
+                        break;
+                        case '3':
+                        if (OverTemperatureDetector) {
+                            uartUsb.write("The temperature is above the maximum level\r\n", 47);
+                            } else {
+                                uartUsb.write("The temperature is below the maximum level\r\n", 47);
+                                }
+                                break;
+                                case '4':
+                                uartUsb.write("Please enter the four digits numeric code", 42);
+                                uartUsb.write("to deactivate the alarm:", 25 );
+                                IncorrectCode = false;
+                                for (KeyBeingCompared = 0;
+                                KeyBeingCompared < THE_NUMBER_OF_KEYS;
+                                KeyBeingCompared++) {
+                                    uartUsb.read(&receivedChar, 1);
+                                    uartUsb.write("*", 1);
+                                    if (CodeSequence[KeyBeingCompared] != receivedChar) {
+                                         IncorrectCode = true;
+                                         }
+                                         }
+                                         if (IncorrectCode == false) {
+                                             uartUsb.write("\r\nThe code entered is correct!\r\n\r\n", 41);
+                      AlarmState = OFF;
+                    IncorrectCodeLed = OFF;
+                         NumberOfIncorrectCodes = 0;
+                } else {
+                    uartUsb.write("\r\nThe code entered is incorrect!\r\n\r\n", 43);
+                    IncorrectCodeLed = ON;
+                NumberOfIncorrectCodes++;
+                }
+                break;
+            case '5':
+                uartUsb.write("Please enter the new four digits numeric code", 46);
+                 uartUsb.write("to deactivate the alarm:", 25);
+                for (KeyBeingCompared = 0;
+                      KeyBeingCompared < THE_NUMBER_OF_KEYS;
+                      KeyBeingCompared++) {
+                    uartUsb.read(&receivedChar, 1);
+                    uartUsb.write("*", 1);
+                }
+                  uartUsb.write("\r\nThe new code has been generated\r\n\r\n", 44);
+                break;
+            case 'c':
+            case 'C':
+                  sprintf(str, "Temperature: %.2f C\r\n", lm35TempC);
+                     stringLength = strlen(str);
+                uartUsb.write(str, stringLength);
+     break;
+            case 'g':
+            case 'G':
+                GasSenorReads = GasSen0127.read();
+                sprintf(str, "Gas Amount: %.2f ppm\r\n",
+                          GasSen0127V(GasSenorReads));
+                  stringLength = strlen(str);
+                uartUsb.write(str, stringLength);
+             break;
+            case 'f':
+            case 'F':
+            sprintf (str,"Temperature: %.2f F\r\n",
+                          CelsiusToFahrenheit(lm35TempC));
+                stringLength = strlen(str);
+                uartUsb.write( str, stringLength );
+                  break;
+            case 's':
+            case 'S':
+             struct tm rtcTime;
+                int strIndex;
+                   uartUsb.write("\r\nPlease type four digits for the current year (YYYY):", 57);
+                for(strIndex=0; strIndex<4; strIndex++) {
+                      uartUsb.read(&str[strIndex] , 1);
+                uartUsb.write(&str[strIndex] ,1);
+                  }
+                str[4] = '\0';
+        rtcTime.tm_year = atoi(str) - 1900;
+                uartUsb.write("\r\n", 2);
+                      uartUsb.write("Please type two digits for the current month (01-12):", 54);
+                 for(strIndex=0; strIndex<2; strIndex++) {
+                    uartUsb.read(&str[strIndex] , 1);
+                       uartUsb.write(&str[strIndex] ,1);
+                }
+                str[2] = '\0';
+            rtcTime.tm_mon  = atoi(str) - 1;
+        uartUsb.write("\r\n", 2);
+                         uartUsb.write("Please type two digits for the current day (01-31):", 52);
+                for(strIndex=0; strIndex<2; strIndex++) {
+                       uartUsb.read(&str[strIndex] , 1);
+                    uartUsb.write( &str[strIndex] ,1);
+                }
+                       str[2] = '\0';
+                rtcTime.tm_mday = atoi(str);
+                      uartUsb.write("\r\n", 2);
+                 uartUsb.write("Please type two digits for the current hour (00-23):", 53);
+            for(strIndex=0; strIndex<2; strIndex++) {
+             uartUsb.read(&str[strIndex] , 1);
+                     uartUsb.write( &str[strIndex] ,1);
+                }
+                str[2] = '\0';
+                 rtcTime.tm_hour = atoi(str);
+            uartUsb.write( "\r\n", 2 );
+                uartUsb.write("Please type two digits for the current minutes (00-59):", 56);
+                  for( strIndex=0; strIndex<2; strIndex++ ) {
+                    uartUsb.read(&str[strIndex] , 1);
+                     uartUsb.write( &str[strIndex] ,1);
+                }
+                str[2] = '\0';
+         rtcTime.tm_min  = atoi(str);
+                  uartUsb.write("\r\n", 2);
+                uartUsb.write("Please type two digits for the current seconds (00-59):", 56);
+          for(strIndex=0; strIndex<2; strIndex++)  {
+                    uartUsb.read(&str[strIndex] , 1);
+                         uartUsb.write(&str[strIndex] ,1);
+                }
+                  str[2] = '\0';
+      rtcTime.tm_sec  = atoi(str);
+              uartUsb.write("\r\n", 2);
+                  rtcTime.tm_isdst = -1;
+                  set_time(mktime(&rtcTime));
+                      uartUsb.write("The date and the time have now been set\r\n", 44);
+                break;
+            case 't':
+            case 'T':
+                time_t epochSeconds;
+     epochSeconds = time(NULL);
+                   sprintf (str, "Date and Time = %s", ctime(&epochSeconds));
+                uartUsb.write(str, strlen(str));
+          uartUsb.write("\r\n", 2);
+                     break;
+case 'e':
+case 'E':
+    for (int i = 0; i < EventsIndex; i++) {
+        for (int j = 0; j < 5; j++) {
+            sprintf(str, "Event = %s\r\n", ArrayOfTheStoredEvents[i].typeOfEvent);
+            uartUsb.write(str, strlen(str));
+            sprintf(str, "Date and Time = %s", ctime(&ArrayOfTheStoredEvents[i].seconds));
+            uartUsb.write(str, strlen(str));
+            uartUsb.write("\r\n", 2);
+        }
+        if (i < EventsIndex - 1) {
+            uartUsb.write("----------------\r\n", 18);
+        }
+    }
+    break;
+            default:
+                AvailableCommands();
+                break;
+
+        }
+    }
+}
+
+// Lines 442-465 displays the available commands
+void AvailableCommands()
+{
+uartUsb.write("The following commands are available:\r\n", 42);
+uartUsb.write("Press '1' to view the alarm state\r\n", 38);
+uartUsb.write("Press '2' to view the gas detector state\r\n", 45);
+uartUsb.write("Press '3' to view the over temperature detector state\r\n", 58);
+uartUsb.write("Press '4' to enter the numeric code sequence\r\n", 49);
+uartUsb.write("Press '5' to enter an alternative code\r\n", 43);
+uartUsb.write("Press 'f' or 'F' to view the lm35 reading in Fahrenheit\r\n", 60);
+uartUsb.write("Press 'g' or 'G' to view the Gas measurement\r\n", 49);
+uartUsb.write("Press 'c' or 'C' to view lm35 reading in Celsius\r\n", 53);
+uartUsb.write("Press 's' or 'S' to set the date and time\r\n", 46);
+uartUsb.write("Press 't' or 'T' to view the date and time\r\n", 47);
+uartUsb.write("Press 'e' or 'E' to view the stored events\r\n\r\n", 51);
+}
+bool AreEqual()
+{
+ int i;
+       for (i = 0; i < THE_NUMBER_OF_KEYS; i++) {
+          if (CodeSequence[i] != KeyPressed[i]) {
+               return false;
+        }
+    }
+    return true;
+}
+
+// Lines 468-480 updates the events log
+void EventLogToUpdate()
+{
+SystemElementStateUpdate(AlarmLastState, AlarmState,"ALARM");
+AlarmLastState = AlarmState;
+SystemElementStateUpdate(GasLastState,GasDetectorState,"GAS_DETECTED");
+GasLastState = GasDetectorState;
+SystemElementStateUpdate(TempemperatureStateLast,OverTemperatureDetector, "OVER_TEMPERATURE");
+TempemperatureStateLast = OverTemperatureDetector;
+SystemElementStateUpdate(IncorrectCodeStateLast, IncorrectCodeLed, "LED_Incorrect_Code");
+IncorrectCodeStateLast = IncorrectCodeLed;
+SystemElementStateUpdate(SystemBlockedStateLast,SystemBlockedLed, "LED_System_Blocked");
+    SystemBlockedStateLast = SystemBlockedLed;
+}
+
+// Lines 484-504 updates the system element state and the log event
+void SystemElementStateUpdate(bool LastState,
+bool CurrentState,
+const char* elementName)
+{
+ char EventAndStateStr[EVENT_NAME_MAXIMUM_LENGTH] = "";
+    if (LastState != CurrentState) {
+           strcat(EventAndStateStr, elementName);
+ if(CurrentState) {
+               strcat(EventAndStateStr, "_ON");
+        } else {
+              strcat(EventAndStateStr, "_OFF");
+        }
+ArrayOfTheStoredEvents[EventsIndex].seconds = time(NULL);
+            strcpy(ArrayOfTheStoredEvents[EventsIndex].typeOfEvent,EventAndStateStr);
+                 if(EventsIndex < EVENT_MAXIMUM_STORAGE - 1 ) {
+            EventsIndex++;
+        } else {
+               EventsIndex = 0;
+        }
+                uartUsb.write(EventAndStateStr , strlen(EventAndStateStr));
+        uartUsb.write("\r\n", 2);
+    }
+}
+
+float AnalogReadingScaledWithTheLM35Formula(float AnalogReading) // Reads the LM35 Temp Sensor 
+{
+        return (AnalogReading * 3.3 / 0.01); // Displays reading in Celcius
+}
+float CelsiusToFahrenheit( float TempInCelsiusDegrees)  // Converts Celsius to Fahrenheit
+{
+    return (TempInCelsiusDegrees* 9.0 / 5.0 + 32.0); // Formula to convert Celsius to Fahrenheit
+}
+
+// Lines 518-522 initialises temperature readings in array
+void lm35ReadingsArrayInit()
+{
+    int i;
+    for(i=0; i<THE_NUMBER_OF_AVGERAGE_SAMPLES ; i++) {
+          lm35ReadingsArray[i] = 0;
+    }
+}
+
+// Lines 527-532 initilaises the leypad
+void MatrixKeypadInit()
+{
+ MatrixKeypadState = MATRIX_KEYPAD_SCANNING;
+      int PinIndex = 0;
+           for(PinIndex=0; PinIndex<THE_KEYPAD_NUMBER_OF_COLUMNS; PinIndex++) {
+    (KeypadColPins[PinIndex]).mode(PullUp);
+    }
+}
+
+// Lines 537-553 scans for the key presses
+char MatrixKeypadScan()
+{
+int row = 0;
+      int col = 0;
+    int i = 0;
+    for(row=0; row<THE_KEYPAD_NUMBER_OF_ROWS; row++) {
+        for(i=0; i<THE_KEYPAD_NUMBER_OF_ROWS; i++) {
+                   KeypadRowPins[i] = ON;
+        }
+  KeypadRowPins[row] = OFF;
+ for(col=0; col<THE_KEYPAD_NUMBER_OF_COLUMNS; col++)  {
+            if(KeypadColPins[col] == OFF)  {
+                  return TheMatrixOfKeypadIndexIntoTheCharArray[row*THE_KEYPAD_NUMBER_OF_ROWS + col];
+            }
+        }
+    }
+       return '\0';
+}
+
+// Lines 557-596 updates the keypad state
+char MatrixKeypadUpdate()
+{
+    char KeyDetected = '\0';
+          char KeyReleased = '\0';
+     switch(MatrixKeypadState) {
+              case MATRIX_KEYPAD_SCANNING:
+     KeyDetected = MatrixKeypadScan();
+              if(KeyDetected != '\0') {
+                       TheMatrixKeypadTheLastKeyPressed = KeyDetected;
+            TheAccDebouncefMatrixKeypadTime = 0;
+                MatrixKeypadState = MATRIX_KEYPAD_DEBOUNCE;
+            }
+                      break;
+        case MATRIX_KEYPAD_DEBOUNCE:
+                  if(TheAccDebouncefMatrixKeypadTime >=
+         DEBOUNCE_KEY_TIME_MS ) {
+                  KeyDetected = MatrixKeypadScan();
+          if(KeyDetected == TheMatrixKeypadTheLastKeyPressed) {
+                      MatrixKeypadState = MATRIX_KEYPAD_KEY_HOLD_PRESSED;
+      } else {
+                      MatrixKeypadState = MATRIX_KEYPAD_SCANNING;
+                }
+            }
+        TheAccDebouncefMatrixKeypadTime =
+                    TheAccDebouncefMatrixKeypadTime + TIME_INCREMENT_MS;
+              break;
+          case MATRIX_KEYPAD_KEY_HOLD_PRESSED:
+    KeyDetected = MatrixKeypadScan();
+            if(KeyDetected != TheMatrixKeypadTheLastKeyPressed) {
+                         if(KeyDetected == '\0' ) {
+       KeyReleased = TheMatrixKeypadTheLastKeyPressed;
+                }
+                     MatrixKeypadState = MATRIX_KEYPAD_SCANNING;
+            }
+              break;
+     default:
+                          MatrixKeypadInit();
+            break;
+    }
+    return KeyReleased;
+}
+
+// Lines 600-602 reads and prints the Gas Sensor readings
+float GasSen0127V(float AnalogRead)
+{
+    return (AnalogRead*4800);
+}
+
+// Lines 606-609 displays the start up message
+void DisplayStartupMessage()
+{
+    uartUsb.write("The system is being checked!\r\n", 33);
+    AvailableCommands();
 }
