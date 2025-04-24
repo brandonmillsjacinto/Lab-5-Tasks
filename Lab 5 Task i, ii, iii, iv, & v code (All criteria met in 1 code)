@@ -109,12 +109,12 @@ char MatrixKeypadUpdate();
 // Main Function
 int main()
 {
-    inputsInit(); // Initialises input pins
-    outputsInit(); // Initialises output pins
+    InputsInit(); // Initialises input pins
+    OutputsInit(); // Initialises output pins
     DisplayStartupMessage(); // Displays the start up message+
     while (true) { // Infinite Loop
-       alarmActivationUpdate(); // Updates alarm activation
-        alarmDeactivationUpdate(); // Updates alarm deactivation
+       AlarmActivationUpdate(); // Updates alarm activation
+        AlarmDeactivationUpdate(); // Updates alarm deactivation
         uartTask(); // Handles UART communication
     EventLogToUpdate(); // Updates event log
     delay(TIME_INCREMENT_MS); // delay for the defined time increment in ms
